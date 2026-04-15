@@ -36,3 +36,15 @@ Requires at least 2 tasks per node. All nodes must have the same task count.
 ```bash
 srun -N 4 --ntasks-per-node=8 dbcast_dir --bar /lustre/project/my_env /mnt/bb/$USER/my_env
 ```
+
+## Benchmark
+
+148 GiB model (52 files) broadcast from Lustre to node-local NVMe on two
+Frontier nodes (8 tasks per node):
+
+```
+$ srun -N2 --ntasks-per-node=8 dbcast_dir --bar qwen3_coder_next /mnt/bb/arjunguha/y
+Broadcasting 52 files, 1 dirs, 0 symlinks (148.4 GiB) from /lustre/orion/lrn089/scratch/arjunguha/models/qwen3_coder_next to /mnt/bb/arjunguha/y
+100% |################################| 148.4 GiB / 148.4 GiB  1.0 GiB/s  elapsed 2m 26s
+Broadcast complete: 52 files, 146.48 s, 1.0 GiB/s
+```
