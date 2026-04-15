@@ -424,21 +424,25 @@ static void bcast_file_list(file_list_t* list, int rank, MPI_Comm comm)
 /* Progress bar                                                       */
 /* ================================================================== */
 
+/* Output modes (set via --bar / --silent flags) */
+enum { PROGRESS_LINES, PROGRESS_BAR, PROGRESS_SILENT };
+
 typedef struct {
     double   time_start;
     uint64_t total_bytes;
     uint64_t bytes_done;
-    int      is_interactive;
+    int      mode;           /* PROGRESS_LINES / PROGRESS_BAR / PROGRESS_SILENT */
     int      last_percent;
     char     current_file[256];
 } progress_t;
 
-static void progress_init(progress_t* p, uint64_t total_bytes, double t0)
+static void progress_init(progress_t* p, uint64_t total_bytes, double t0,
+                           int mode)
 {
     p->time_start = t0;
     p->total_bytes = total_bytes;
     p->bytes_done = 0;
-    p->is_interactive = isatty(STDERR_FILENO);
+    p->mode = mode;
     p->last_percent = -1;
     p->current_file[0] = '\0';
 }
@@ -464,7 +468,7 @@ static void format_eta(double secs, char* buf, size_t sz)
 
 static void progress_update(progress_t* p)
 {
-    if (p->total_bytes == 0) return;
+    if (p->mode == PROGRESS_SILENT || p->total_bytes == 0) return;
 
     int percent = (int)((double)p->bytes_done / (double)p->total_bytes * 100.0);
     if (percent > 100) percent = 100;
@@ -485,7 +489,7 @@ static void progress_update(progress_t* p)
     mfu_format_bytes(p->bytes_done,  &done_val,  &done_u);
     mfu_format_bytes(p->total_bytes, &total_val, &total_u);
 
-    if (p->is_interactive) {
+    if (p->mode == PROGRESS_BAR) {
         int bar_w = 32;
         int filled = (int)((double)percent / 100.0 * bar_w);
         char bar[33];
@@ -510,6 +514,8 @@ static void progress_update(progress_t* p)
 
 static void progress_finish(progress_t* p)
 {
+    if (p->mode == PROGRESS_SILENT) return;
+
     double elapsed = MPI_Wtime() - p->time_start;
     double rate = (elapsed > 0.01) ? (double)p->total_bytes / elapsed : 0.0;
     double rate_val;
@@ -523,7 +529,7 @@ static void progress_finish(progress_t* p)
     char el[32];
     format_eta(elapsed, el, sizeof(el));
 
-    if (p->is_interactive) {
+    if (p->mode == PROGRESS_BAR) {
         char bar[33];
         memset(bar, '#', 32);
         bar[32] = '\0';
@@ -791,6 +797,8 @@ static void print_usage(void)
         "node-local storage on every node.\n\n"
         "Options:\n"
         "  -s, --size <SIZE>  block/stripe size (default 1MB)\n"
+        "  --bar              show a single-line progress bar\n"
+        "  --silent           suppress all progress output\n"
         "  -h, --help         print this message\n\n");
 }
 
@@ -808,10 +816,16 @@ int main(int argc, char* argv[])
 
     uint64_t stripe_size = 1024 * 1024;
 
+    int progress_mode = PROGRESS_LINES; /* default: one line per percent */
+    int opt_bar = 0, opt_silent = 0;
+
     /* --- Parse options --- */
+    enum { OPT_BAR = 256, OPT_SILENT };
     static struct option long_opts[] = {
-        {"size", 1, 0, 's'},
-        {"help", 0, 0, 'h'},
+        {"size",   1, 0, 's'},
+        {"bar",    0, 0, OPT_BAR},
+        {"silent", 0, 0, OPT_SILENT},
+        {"help",   0, 0, 'h'},
         {0, 0, 0, 0}
     };
 
@@ -830,6 +844,12 @@ int main(int argc, char* argv[])
             stripe_size = (uint64_t)bval;
             break;
         }
+        case OPT_BAR:
+            opt_bar = 1;
+            break;
+        case OPT_SILENT:
+            opt_silent = 1;
+            break;
         case 'h':
             usage = 1;
             break;
@@ -838,6 +858,13 @@ int main(int argc, char* argv[])
             break;
         }
     }
+
+    if (opt_bar && opt_silent) {
+        if (rank == 0) fprintf(stderr, "Error: --bar and --silent are mutually exclusive\n");
+        usage = 1;
+    }
+    if (opt_bar)    progress_mode = PROGRESS_BAR;
+    if (opt_silent) progress_mode = PROGRESS_SILENT;
 
     if (!usage && (argc - optind) < 2) {
         if (rank == 0) fprintf(stderr, "Error: need SRC_DIR and DST_DIR\n");
@@ -936,7 +963,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    if (rank == 0) {
+    if (rank == 0 && progress_mode != PROGRESS_SILENT) {
         double tv; const char* tu;
         mfu_format_bytes(flist.total_file_bytes, &tv, &tu);
         fprintf(stderr,
@@ -989,7 +1016,8 @@ int main(int argc, char* argv[])
     /* --- Phase 2: Broadcast regular files --- */
     progress_t progress;
     if (rank == 0) {
-        progress_init(&progress, flist.total_file_bytes, time_start);
+        progress_init(&progress, flist.total_file_bytes, time_start,
+                      progress_mode);
     }
 
     uint64_t base_bytes = 0;
@@ -1050,7 +1078,7 @@ int main(int argc, char* argv[])
     MPI_Barrier(MPI_COMM_WORLD);
 
     /* --- Report --- */
-    if (rank == 0) {
+    if (rank == 0 && progress_mode != PROGRESS_SILENT) {
         double elapsed = MPI_Wtime() - time_start;
         double rate = (elapsed > 0.01)
                     ? (double)flist.total_file_bytes / elapsed : 0.0;
